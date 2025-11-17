@@ -4,12 +4,25 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 public class CartographicaConfig {
+
+    public enum PlayerIndicatorType {
+        SIMPLE_TRIANGLE,
+        ARROW_SHAPE,
+        TEXTURE
+    }
+
+    public enum MinimapShape {
+        SQUARE,
+        CIRCLE
+    }
+
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
 
     public static final ModConfigSpec.IntValue MINIMAP_SIZE;
     public static final ModConfigSpec.EnumValue<MinimapShape> MINIMAP_SHAPE;
     public static final ModConfigSpec.IntValue MINIMAP_MARGIN;
     public static final ModConfigSpec.BooleanValue SHOW_COORDINATES;
+    public static final ModConfigSpec.EnumValue<PlayerIndicatorType> PLAYER_INDICATOR_TYPE;
 
     public static final ModConfigSpec SPEC;
 
@@ -27,11 +40,13 @@ public class CartographicaConfig {
         SHOW_COORDINATES = BUILDER
                 .comment("Display player coordinates below the minimap")
                 .define("showCoordinates", false);
+        PLAYER_INDICATOR_TYPE = BUILDER
+                .comment("Type of player indicator on the minimap")
+                .defineEnum("playerIndicator", PlayerIndicatorType.ARROW_SHAPE);
+
         BUILDER.pop();
+
         SPEC = BUILDER.build();
     }
-    public enum MinimapShape {
-        SQUARE,
-        CIRCLE
-    }
+
 }
