@@ -2,250 +2,402 @@ package com.drenn.cartographica.client;
 
 import com.drenn.cartographica.Cartographica;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.color.block.BlockColors;
+import net.minecraft.client.renderer.block.BlockModelShaper;
+import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.levelgen.Heightmap;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class TileManager {
 
-    // Tile configuration
-    public static final int TILE_SIZE = 16; // 16x16 blocks per tile
+    public static final int TILE_SIZE = 512;
 
-    // Cache directory
-    private static Path tileDirectory = null;
+    private static File tileDirectory;
+    private static final ExecutorService renderExecutor = Executors.newFixedThreadPool(2);
+    private static final ConcurrentHashMap<String, BufferedImage> tileCache = new ConcurrentHashMap<>();
 
-    /**
-     * Initialize the tile system for the current world
-     */
-    public static void initialize(String worldName, String dimension) {
-        // Get Minecraft's game directory
+    public static void initialize(String worldName, String dimensionName) {
         File gameDir = Minecraft.getInstance().gameDirectory;
+        tileDirectory = new File(gameDir, "cartographica/" + worldName + "/" + dimensionName + "/tiles");
 
-        // Create path: .minecraft/cartographica/[world]/[dimension]/tiles/
-        Path cartographicaDir = gameDir.toPath()
-                .resolve("cartographica")
-                .resolve(worldName)
-                .resolve(dimension)
-                .resolve("tiles");
-
-        try {
-            Files.createDirectories(cartographicaDir);
-            tileDirectory = cartographicaDir;
-            Cartographica.LOGGER.info("Tile directory initialized: {}", cartographicaDir);
-        } catch (IOException e) {
-            Cartographica.LOGGER.error("Failed to create tile directory", e);
+        if (!tileDirectory.exists()) {
+            tileDirectory.mkdirs();
+            Cartographica.LOGGER.info("Created tile directory: {}", tileDirectory.getAbsolutePath());
+        } else {
+            Cartographica.LOGGER.info("Tile directory exists: {}", tileDirectory.getAbsolutePath());
         }
+
+        tileCache.clear();
     }
 
-    /**
-     * Get the tile coordinates for a given block position
-     */
-    public static int getTileX(int blockX) {
-        return Math.floorDiv(blockX, TILE_SIZE);
+    public static void shutdown() {
+        renderExecutor.shutdownNow();
+        tileCache.clear();
     }
 
-    public static int getTileZ(int blockZ) {
-        return Math.floorDiv(blockZ, TILE_SIZE);
+    public static int getTileX(int worldX) {
+        return Math.floorDiv(worldX, TILE_SIZE);
     }
 
-    /**
-     * Get the file for a specific tile
-     */
-    public static File getTileFile(int tileX, int tileZ) {
+    public static int getTileZ(int worldZ) {
+        return Math.floorDiv(worldZ, TILE_SIZE);
+    }
+
+    public static boolean tileExists(int tileX, int tileZ) {
+        if (tileDirectory == null) {
+            return false;
+        }
+        File tileFile = new File(tileDirectory, tileX + "_" + tileZ + ".png");
+        return tileFile.exists();
+    }
+
+    public static BufferedImage loadTile(int tileX, int tileZ) {
+        String key = tileX + "_" + tileZ;
+
+        if (tileCache.containsKey(key)) {
+            return tileCache.get(key);
+        }
+
         if (tileDirectory == null) {
             return null;
         }
-        return tileDirectory.resolve(String.format("tile_%d_%d.png", tileX, tileZ)).toFile();
-    }
 
-    /**
-     * Check if a tile exists
-     */
-    public static boolean tileExists(int tileX, int tileZ) {
-        File file = getTileFile(tileX, tileZ);
-        return file != null && file.exists();
-    }
+        File tileFile = new File(tileDirectory, tileX + "_" + tileZ + ".png");
 
-    /**
-     * Load a tile from disk
-     */
-    public static BufferedImage loadTile(int tileX, int tileZ) {
-        File file = getTileFile(tileX, tileZ);
-        if (file == null || !file.exists()) {
+        if (!tileFile.exists()) {
             return null;
         }
 
         try {
-            return ImageIO.read(file);
+            BufferedImage image = ImageIO.read(tileFile);
+            tileCache.put(key, image);
+            return image;
         } catch (IOException e) {
-            Cartographica.LOGGER.error("Failed to load tile {}_{}", tileX, tileZ, e);
+            Cartographica.LOGGER.error("Failed to load tile {}_{}: {}", tileX, tileZ, e.getMessage());
             return null;
         }
     }
 
-    /**
-     * Generate a tile by sampling the world
-     */
-    public static BufferedImage generateTile(Level level, int tileX, int tileZ) {
-        BufferedImage image = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
-
-        // Calculate world coordinates for this tile
-        int startX = tileX * TILE_SIZE;
-        int startZ = tileZ * TILE_SIZE;
-
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null) {
-            return image;
+    public static void updateChunkInTile(Level level, LevelChunk chunk) {
+        if (!level.isClientSide()) {
+            return;
         }
 
-        int playerY = (int) mc.player.getY();
+        ChunkPos chunkPos = chunk.getPos();
+        int chunkWorldX = chunkPos.x << 4;
+        int chunkWorldZ = chunkPos.z << 4;
 
-        // Render each block in the tile
-        for (int x = 0; x < TILE_SIZE; x++) {
-            for (int z = 0; z < TILE_SIZE; z++) {
-                int worldX = startX + x;
-                int worldZ = startZ + z;
+        int tileX = getTileX(chunkWorldX);
+        int tileZ = getTileZ(chunkWorldZ);
 
-                // Get the color for this block
-                int color = getBlockColorForTile(level, worldX, worldZ, playerY);
-
-                // Set pixel in image
-                image.setRGB(x, z, color);
+        renderExecutor.submit(() -> {
+            try {
+                updateChunkInTileInternal(level, chunk, tileX, tileZ);
+            } catch (Exception e) {
+                Cartographica.LOGGER.error("Error updating chunk in tile: {}", e.getMessage());
             }
-        }
-
-        return image;
+        });
     }
 
-    /**
-     * Get block color for tile generation (similar to MinimapRenderer but optimized)
-     */
-    private static int getBlockColorForTile(Level level, int x, int z, int startY) {
-        // Find top block
-        int y = getTopBlockY(level, x, z, startY);
+    private static void updateChunkInTileInternal(Level level, LevelChunk chunk, int tileX, int tileZ) {
+        String key = tileX + "_" + tileZ;
+        BufferedImage tileImage = tileCache.get(key);
 
-        var pos = new BlockPos(x, y, z);
-        var state = level.getBlockState(pos);
-
-        if (state.isAir()) {
-            return 0x00000000; // Transparent
+        if (tileImage == null) {
+            tileImage = loadTile(tileX, tileZ);
         }
 
-        Minecraft mc = Minecraft.getInstance();
-        var blockColors = mc.getBlockColors();
-
-        // Check if water
-        boolean isWater = state.getBlock() instanceof LiquidBlock;
-
-        if (isWater) {
-            int waterColor = blockColors.getColor(state, level, pos, 0);
-            if (waterColor == -1 || waterColor == 0xFFFFFF) {
-                waterColor = 0x3F76E4;
+        if (tileImage == null) {
+            tileImage = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
+            for (int x = 0; x < TILE_SIZE; x++) {
+                for (int z = 0; z < TILE_SIZE; z++) {
+                    tileImage.setRGB(x, z, 0x00000000);
+                }
             }
+        }
 
-            // Find terrain below
-            int terrainY = y;
-            for (int checkY = y - 1; checkY >= level.getMinBuildHeight(); checkY--) {
-                var checkPos = new BlockPos(x, checkY, z);
-                var checkState = level.getBlockState(checkPos);
+        Minecraft minecraft = Minecraft.getInstance();
+        BlockColors blockColors = minecraft.getBlockColors();
+        BlockModelShaper modelShaper = minecraft.getBlockRenderer().getBlockModelShaper();
 
-                if (checkState.isAir() || checkState.getBlock() instanceof LiquidBlock) {
+        ChunkPos chunkPos = chunk.getPos();
+        int chunkWorldX = chunkPos.x << 4;
+        int chunkWorldZ = chunkPos.z << 4;
+
+        for (int dx = 0; dx < 16; dx++) {
+            for (int dz = 0; dz < 16; dz++) {
+                int worldX = chunkWorldX + dx;
+                int worldZ = chunkWorldZ + dz;
+
+                int tileLocalX = worldX - (tileX * TILE_SIZE);
+                int tileLocalZ = worldZ - (tileZ * TILE_SIZE);
+
+                if (tileLocalX < 0 || tileLocalX >= TILE_SIZE ||
+                        tileLocalZ < 0 || tileLocalZ >= TILE_SIZE) {
                     continue;
                 }
 
-                terrainY = checkY;
-                break;
+                int worldY = level.getHeight(Heightmap.Types.WORLD_SURFACE, worldX, worldZ) - 1;
+                worldY = Math.max(level.getMinBuildHeight(), Math.min(worldY, level.getMaxBuildHeight()));
+
+                BlockPos pos = new BlockPos(worldX, worldY, worldZ);
+                BlockState blockState = level.getBlockState(pos);
+
+                int color = getBlockColor(blockColors, modelShaper, level, pos, blockState);
+                tileImage.setRGB(tileLocalX, tileLocalZ, color);
             }
+        }
 
-            if (terrainY < y) {
-                var terrainPos = new BlockPos(x, terrainY, z);
-                var terrainState = level.getBlockState(terrainPos);
-                int terrainColor = blockColors.getColor(terrainState, level, terrainPos, 0);
+        tileCache.put(key, tileImage);
+        saveTile(tileX, tileZ, tileImage);
+    }
 
-                if (terrainColor == -1 || terrainColor == 0xFFFFFF) {
-                    terrainColor = terrainState.getMapColor(level, terrainPos).col;
+    public static void generateAndSaveTile(Level level, int tileX, int tileZ) {
+        renderExecutor.submit(() -> {
+            try {
+                generateAndSaveTileInternal(level, tileX, tileZ);
+            } catch (Exception e) {
+                Cartographica.LOGGER.error("Error generating tile: {}", e.getMessage());
+            }
+        });
+    }
+
+    private static void generateAndSaveTileInternal(Level level, int tileX, int tileZ) {
+        BufferedImage tileImage = loadTile(tileX, tileZ);
+
+        if (tileImage == null) {
+            tileImage = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
+            for (int x = 0; x < TILE_SIZE; x++) {
+                for (int z = 0; z < TILE_SIZE; z++) {
+                    tileImage.setRGB(x, z, 0x00000000);
+                }
+            }
+        }
+
+        Minecraft minecraft = Minecraft.getInstance();
+        BlockColors blockColors = minecraft.getBlockColors();
+        BlockModelShaper modelShaper = minecraft.getBlockRenderer().getBlockModelShaper();
+
+        int startChunkX = (tileX * TILE_SIZE) >> 4;
+        int startChunkZ = (tileZ * TILE_SIZE) >> 4;
+        int endChunkX = ((tileX * TILE_SIZE) + TILE_SIZE - 1) >> 4;
+        int endChunkZ = ((tileZ * TILE_SIZE) + TILE_SIZE - 1) >> 4;
+
+        int chunksUpdated = 0;
+
+        for (int chunkX = startChunkX; chunkX <= endChunkX; chunkX++) {
+            for (int chunkZ = startChunkZ; chunkZ <= endChunkZ; chunkZ++) {
+                if (!level.hasChunk(chunkX, chunkZ)) {
+                    continue;
                 }
 
-                return blendColors(waterColor, terrainColor, 0.6f);
+                LevelChunk chunk = level.getChunk(chunkX, chunkZ);
+                renderChunkToTile(level, chunk, tileX, tileZ, tileImage, blockColors, modelShaper);
+                chunksUpdated++;
             }
-
-            return 0xFF000000 | waterColor;
         }
 
-        // Regular block
-        int color = blockColors.getColor(state, level, pos, 0);
-
-        if (color == -1 || color == 0xFFFFFF) {
-            color = state.getMapColor(level, pos).col;
+        if (chunksUpdated > 0) {
+            String key = tileX + "_" + tileZ;
+            tileCache.put(key, tileImage);
+            saveTile(tileX, tileZ, tileImage);
+            Cartographica.LOGGER.info("Generated tile {}_{} with {} chunks", tileX, tileZ, chunksUpdated);
         }
-
-        return 0xFF000000 | color;
     }
 
-    private static int getTopBlockY(Level level, int x, int z, int startY) {
-        int maxY = Math.min(level.getMaxBuildHeight() - 1, startY + 30);
+    private static void renderChunkToTile(Level level, LevelChunk chunk, int tileX, int tileZ,
+                                          BufferedImage tileImage, BlockColors blockColors,
+                                          BlockModelShaper modelShaper) {
+        ChunkPos chunkPos = chunk.getPos();
+        int chunkWorldX = chunkPos.x << 4;
+        int chunkWorldZ = chunkPos.z << 4;
 
-        for (int y = maxY; y >= level.getMinBuildHeight(); y--) {
-            var pos = new BlockPos(x, y, z);
-            var state = level.getBlockState(pos);
+        for (int dx = 0; dx < 16; dx++) {
+            for (int dz = 0; dz < 16; dz++) {
+                int worldX = chunkWorldX + dx;
+                int worldZ = chunkWorldZ + dz;
 
-            if (state.isAir()) {
-                continue;
+                int tileLocalX = worldX - (tileX * TILE_SIZE);
+                int tileLocalZ = worldZ - (tileZ * TILE_SIZE);
+
+                if (tileLocalX < 0 || tileLocalX >= TILE_SIZE ||
+                        tileLocalZ < 0 || tileLocalZ >= TILE_SIZE) {
+                    continue;
+                }
+
+                int worldY = level.getHeight(Heightmap.Types.WORLD_SURFACE, worldX, worldZ) - 1;
+                worldY = Math.max(level.getMinBuildHeight(), Math.min(worldY, level.getMaxBuildHeight()));
+
+                BlockPos pos = new BlockPos(worldX, worldY, worldZ);
+                BlockState blockState = level.getBlockState(pos);
+
+                int color = getBlockColor(blockColors, modelShaper, level, pos, blockState);
+                tileImage.setRGB(tileLocalX, tileLocalZ, color);
             }
-
-            return y;
         }
-
-        return level.getSeaLevel();
     }
 
-    private static int blendColors(int color1, int color2, float ratio) {
-        int r1 = (color1 >> 16) & 0xFF;
-        int g1 = (color1 >> 8) & 0xFF;
-        int b1 = color1 & 0xFF;
+    /**
+     * Get block color using Minecraft's ACTUAL texture - NO MODIFICATIONS!
+     */
+    private static int getBlockColor(BlockColors blockColors, BlockModelShaper modelShaper,
+                                     Level level, BlockPos pos, BlockState blockState) {
+        if (blockState.isAir()) {
+            return 0x00000000;
+        }
 
-        int r2 = (color2 >> 16) & 0xFF;
-        int g2 = (color2 >> 8) & 0xFF;
-        int b2 = color2 & 0xFF;
+        try {
+            // Get texture color
+            BakedModel model = modelShaper.getBlockModel(blockState);
+            TextureAtlasSprite sprite = model.getParticleIcon();
+            int textureColor = sampleSpriteAverage(sprite);
 
-        int r = (int)(r1 * ratio + r2 * (1 - ratio));
-        int g = (int)(g1 * ratio + g2 * (1 - ratio));
-        int b = (int)(b1 * ratio + b2 * (1 - ratio));
+            // Apply biome tint if Minecraft wants it
+            int tintColor = blockColors.getColor(blockState, level, pos, 0);
+            if (tintColor != -1 && tintColor != 0xFFFFFF) {
+                textureColor = multiplyColors(textureColor, tintColor);
+            }
+
+            // Brighten to compensate for lack of 3D lighting
+            textureColor = brightenColor(textureColor, 1.15f);
+
+            return 0xFF000000 | textureColor;
+
+        } catch (Exception e) {
+            return 0xFF888888;
+        }
+    }
+
+    /**
+     * Sample texture color - just read the pixels!
+     */
+    private static int sampleSpriteAverage(TextureAtlasSprite sprite) {
+        try {
+            int width = sprite.contents().width();
+            int height = sprite.contents().height();
+
+            if (width == 0 || height == 0) {
+                return 0x888888;
+            }
+
+            long totalR = 0;
+            long totalG = 0;
+            long totalB = 0;
+            int validSamples = 0;
+
+            // Sample a 4x4 grid across the texture
+            for (int sy = 0; sy < 4; sy++) {
+                for (int sx = 0; sx < 4; sx++) {
+                    // Calculate sample position
+                    int x = (width * sx) / 4 + width / 8;
+                    int y = (height * sy) / 4 + height / 8;
+
+                    // Clamp to bounds
+                    if (x >= width) x = width - 1;
+                    if (y >= height) y = height - 1;
+
+                    // Read pixel color (ABGR format)
+                    int rgba = sprite.getPixelRGBA(0, x, y);
+
+                    // Extract color channels
+                    int a = (rgba >> 24) & 0xFF;  // Alpha
+                    int b = (rgba >> 16) & 0xFF;  // Blue
+                    int g = (rgba >> 8) & 0xFF;   // Green
+                    int r = rgba & 0xFF;          // Red
+
+                    // Skip transparent pixels (they're not part of the block!)
+                    if (a < 128) {
+                        continue;
+                    }
+
+                    // Add to total
+                    totalR += r;
+                    totalG += g;
+                    totalB += b;
+                    validSamples++;
+                }
+            }
+
+            // If no valid samples, return gray
+            if (validSamples == 0) {
+                return 0x888888;
+            }
+
+            // Calculate average color
+            int avgR = (int) (totalR / validSamples);
+            int avgG = (int) (totalG / validSamples);
+            int avgB = (int) (totalB / validSamples);
+
+            return (avgR << 16) | (avgG << 8) | avgB;
+
+        } catch (Exception e) {
+            Cartographica.LOGGER.error("Error sampling sprite: {}", e.getMessage());
+            return 0x888888;
+        }
+    }
+
+    private static int brightenColor(int color, float factor) {
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = color & 0xFF;
+
+        // Apply brightness factor
+        r = Math.min(255, (int)(r * factor));
+        g = Math.min(255, (int)(g * factor));
+        b = Math.min(255, (int)(b * factor));
 
         return (r << 16) | (g << 8) | b;
     }
 
     /**
-     * Save a tile to disk
+     * Standard multiply for biome tinting
      */
-    public static void saveTile(BufferedImage image, int tileX, int tileZ) {
-        File file = getTileFile(tileX, tileZ);
-        if (file == null) {
+    private static int multiplyColors(int textureColor, int tintColor) {
+        int tr = (textureColor >> 16) & 0xFF;
+        int tg = (textureColor >> 8) & 0xFF;
+        int tb = textureColor & 0xFF;
+
+        int br = (tintColor >> 16) & 0xFF;
+        int bg = (tintColor >> 8) & 0xFF;
+        int bb = tintColor & 0xFF;
+
+        int r = (tr * br) / 255;
+        int g = (tg * bg) / 255;
+        int b = (tb * bb) / 255;
+
+        return (r << 16) | (g << 8) | b;
+    }
+
+    private static void saveTile(int tileX, int tileZ, BufferedImage image) {
+        if (tileDirectory == null) {
             return;
         }
 
+        File tileFile = new File(tileDirectory, tileX + "_" + tileZ + ".png");
+
         try {
-            ImageIO.write(image, "PNG", file);
-            Cartographica.LOGGER.info("Saved tile {}_{}", tileX, tileZ);
+            ImageIO.write(image, "png", tileFile);
         } catch (IOException e) {
-            Cartographica.LOGGER.error("Failed to save tile {}_{}", tileX, tileZ, e);
+            Cartographica.LOGGER.error("Failed to save tile {}_{}: {}", tileX, tileZ, e.getMessage());
         }
     }
 
-    /**
-     * Generate and save a tile if it doesn't exist
-     */
-    public static void ensureTileExists(Level level, int tileX, int tileZ) {
-        if (!tileExists(tileX, tileZ)) {
-            BufferedImage tile = generateTile(level, tileX, tileZ);
-            saveTile(tile, tileX, tileZ);
-        }
+    public static void invalidateTile(int tileX, int tileZ) {
+        String key = tileX + "_" + tileZ;
+        tileCache.remove(key);
     }
 }

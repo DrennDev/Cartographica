@@ -2,223 +2,336 @@ package com.drenn.cartographica.client;
 
 import com.drenn.cartographica.Cartographica;
 import com.drenn.cartographica.config.CartographicaConfig;
-import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.client.Minecraft;
-import net.minecraft.world.phys.Vec3;
-import net.neoforged.api.distmarker.Dist;
-import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.client.event.RenderGuiEvent;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.player.Player;
 
 import java.awt.image.BufferedImage;
+import java.util.HashMap;
+import java.util.Map;
 
-@EventBusSubscriber(modid = Cartographica.MOD_ID, value = Dist.CLIENT)
+import java.awt.image.BufferedImage;
+import java.util.HashMap;
+import java.util.Map;
+
 public class MinimapRenderer {
 
-    @SubscribeEvent
-    public static void onRenderGui(RenderGuiEvent.Post event) {
-        Minecraft mc = Minecraft.getInstance();
+    private static final Minecraft mc = Minecraft.getInstance();
+    private static final Map<String, ResourceLocation> tileTextureCache = new HashMap<>();
+    private static int nextTextureId = 0;
 
-        if (mc.player == null || mc.screen != null) {
+    /**
+     * Render the minimap HUD overlay
+     */
+    public static void render(GuiGraphics graphics, float partialTick) {
+        if (!CartographicaConfig.MINIMAP_ENABLED.get()) {
             return;
         }
 
-        var graphics = event.getGuiGraphics();
-
-        // Get config values
-        int minimapSize = CartographicaConfig.MINIMAP_SIZE.get();
-        int margin = CartographicaConfig.MINIMAP_MARGIN.get();
-        boolean showCoords = CartographicaConfig.SHOW_COORDINATES.get();
-
-        // Calculate minimap position
-        int screenWidth = mc.getWindow().getGuiScaledWidth();
-        int minimapX = screenWidth - minimapSize - margin;
-        int minimapY = margin;
-
-        // Draw background
-        int backgroundColor = 0x80000000;
-        graphics.fill(minimapX, minimapY, minimapX + minimapSize, minimapY + minimapSize, backgroundColor);
-
-        // Draw terrain from tiles (FAST!)
-        drawTerrainFromTiles(graphics, mc, minimapX, minimapY, minimapSize);
-
-        // Draw border
-        int borderColor = 0xFFFFFFFF;
-        drawBorder(graphics, minimapX, minimapY, minimapSize, borderColor);
-
-        // Draw player arrow
-        drawPlayerArrow(graphics, mc, minimapX, minimapY, minimapSize);
-
-        // Optionally show coordinates
-        if (showCoords) {
-            drawCoordinates(graphics, mc, minimapX, minimapY, minimapSize);
+        if (mc.player == null || mc.level == null) {
+            return;
         }
+
+        // Get config settings
+        int size = CartographicaConfig.MINIMAP_SIZE.get();
+        CartographicaConfig.MinimapPosition position = CartographicaConfig.MINIMAP_POSITION.get();
+        int margin = CartographicaConfig.MINIMAP_MARGIN.get();
+
+        // Calculate position on screen
+        int x = calculateX(position, size, margin);
+        int y = calculateY(position, size, margin);
+
+        // Render based on shape
+        if (CartographicaConfig.MINIMAP_SHAPE.get() == CartographicaConfig.MinimapShape.CIRCLE) {
+            renderCircularMinimap(graphics, x, y, size, partialTick);
+        } else {
+            renderSquareMinimap(graphics, x, y, size, partialTick);
+        }
+
+        // Render overlays (coordinates, time, etc.)
+        renderOverlays(graphics, x, y, size);
     }
 
-    private static void drawTerrainFromTiles(net.minecraft.client.gui.GuiGraphics graphics, Minecraft mc,
-                                             int minimapX, int minimapY, int minimapSize) {
-        if (mc.level == null || mc.player == null) {
+    /**
+     * Render square minimap
+     */
+    private static void renderSquareMinimap(GuiGraphics graphics, int x, int y, int size, float partialTick) {
+        Player player = mc.player;
+
+        // Draw background
+        graphics.fill(x, y, x + size, y + size, 0xAA000000);
+
+        // Render map tiles
+        renderMapTiles(graphics, x, y, size, partialTick);
+
+        // Draw border
+        if (CartographicaConfig.SHOW_BORDER.get()) {
+            int borderColor = CartographicaConfig.BORDER_COLOR.get();
+            int borderWidth = CartographicaConfig.BORDER_WIDTH.get();
+
+            for (int i = 0; i < borderWidth; i++) {
+                // Top
+                graphics.fill(x - i, y - i, x + size + i, y - i + 1, borderColor);
+                // Bottom
+                graphics.fill(x - i, y + size + i - 1, x + size + i, y + size + i, borderColor);
+                // Left
+                graphics.fill(x - i, y - i, x - i + 1, y + size + i, borderColor);
+                // Right
+                graphics.fill(x + size + i - 1, y - i, x + size + i, y + size + i, borderColor);
+            }
+        }
+
+        // Draw player marker at center
+        renderPlayerMarker(graphics, x + size / 2, y + size / 2);
+    }
+
+    /**
+     * Render circular minimap (with masking)
+     */
+    private static void renderCircularMinimap(GuiGraphics graphics, int x, int y, int size, float partialTick) {
+        // TODO: Implement circular masking using stencil buffer
+        // For now, use square
+        renderSquareMinimap(graphics, x, y, size, partialTick);
+    }
+
+    /**
+     * Render map tiles in the minimap area
+     */
+    private static void renderMapTiles(GuiGraphics graphics, int screenX, int screenY, int size, float partialTick) {
+        if (mc.player == null || mc.level == null) {
             return;
         }
 
-        // Get player position
-        int playerBlockX = (int) mc.player.getX();
-        int playerBlockZ = (int) mc.player.getZ();
+        double playerX = mc.player.getX();
+        double playerZ = mc.player.getZ();
+        double zoom = CartographicaConfig.MINIMAP_ZOOM.get();
 
-        // For each pixel on the minimap, sample from the appropriate tile
-        int radius = minimapSize / 2;
+        // How many blocks fit in the minimap?
+        int blocksVisible = (int) (size / zoom);
 
-        for (int dx = -radius; dx < radius; dx++) {
-            for (int dz = -radius; dz < radius; dz++) {
-                // World position for this pixel
-                int worldX = playerBlockX + dx;
-                int worldZ = playerBlockZ + dz;
+        // Calculate world bounds
+        int minWorldX = (int) (playerX - blocksVisible / 2);
+        int maxWorldX = (int) (playerX + blocksVisible / 2);
+        int minWorldZ = (int) (playerZ - blocksVisible / 2);
+        int maxWorldZ = (int) (playerZ + blocksVisible / 2);
 
-                // Which tile contains this block?
-                int tileX = TileManager.getTileX(worldX);
-                int tileZ = TileManager.getTileZ(worldZ);
+        // Calculate tile bounds
+        int minTileX = TileManager.getTileX(minWorldX);
+        int maxTileX = TileManager.getTileX(maxWorldX);
+        int minTileZ = TileManager.getTileZ(minWorldZ);
+        int maxTileZ = TileManager.getTileZ(maxWorldZ);
 
-                // Load the tile
-                BufferedImage tile = TileManager.loadTile(tileX, tileZ);
-                if (tile == null) {
-                    continue; // Tile not generated yet
-                }
-
-                // Which pixel in the tile?
-                int tilePixelX = Math.floorMod(worldX, TileManager.TILE_SIZE);
-                int tilePixelZ = Math.floorMod(worldZ, TileManager.TILE_SIZE);
-
-                // Get color from tile
-                int color = tile.getRGB(tilePixelX, tilePixelZ);
-
-                // Draw on minimap
-                int minimapPixelX = minimapX + radius + dx;
-                int minimapPixelZ = minimapY + radius + dz;
-
-                if (color != 0) { // Don't draw fully transparent
-                    graphics.fill(minimapPixelX, minimapPixelZ, minimapPixelX + 1, minimapPixelZ + 1, color);
-                }
+        // Render each tile
+        for (int tileX = minTileX; tileX <= maxTileX; tileX++) {
+            for (int tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+                renderMinimapTile(graphics, tileX, tileZ, screenX, screenY, size, playerX, playerZ, zoom);
             }
         }
     }
 
-    private static void drawPlayerArrow(net.minecraft.client.gui.GuiGraphics graphics, Minecraft mc,
-                                        int minimapX, int minimapY, int minimapSize) {
-        int centerX = minimapX + minimapSize / 2;
-        int centerY = minimapY + minimapSize / 2;
-        float yaw = mc.player.getYRot();
-
-        CartographicaConfig.PlayerIndicatorType indicatorType =
-                CartographicaConfig.PLAYER_INDICATOR_TYPE.get();
-
-        PoseStack poseStack = graphics.pose();
-        poseStack.pushPose();
-        poseStack.translate(centerX, centerY, 0);
-        poseStack.mulPose(com.mojang.math.Axis.ZP.rotationDegrees(yaw + 180));
-
-        switch (indicatorType) {
-            case SIMPLE_TRIANGLE -> drawSimpleTriangle(graphics);
-            case ARROW_SHAPE -> drawArrowShape(graphics);
-            case TEXTURE -> drawTextureArrow(graphics, mc);
+    /**
+     * Render a single tile on the minimap
+     */
+    private static void renderMinimapTile(GuiGraphics graphics, int tileX, int tileZ,
+                                          int screenX, int screenY, int size,
+                                          double playerX, double playerZ, double zoom) {
+        // Get tile texture
+        ResourceLocation texture = getTileTexture(tileX, tileZ);
+        if (texture == null) {
+            return;
         }
 
-        poseStack.popPose();
-    }
+        // Calculate tile world position
+        double tileWorldX = tileX * TileManager.TILE_SIZE;
+        double tileWorldZ = tileZ * TileManager.TILE_SIZE;
 
-    private static void drawSimpleTriangle(net.minecraft.client.gui.GuiGraphics graphics) {
-        int arrowSize = 5;
-        int arrowColor = 0xFFFF0000;
-        drawTriangle(graphics, 0, -arrowSize, -arrowSize, arrowSize, arrowSize, arrowSize, arrowColor);
-    }
+        // Convert to minimap-relative coordinates
+        double relativeX = tileWorldX - playerX;
+        double relativeZ = tileWorldZ - playerZ;
 
-    private static void drawArrowShape(net.minecraft.client.gui.GuiGraphics graphics) {
-        int arrowColor = 0xFFFF0000;
-        int x1 = 0, y1 = -7;
-        int x2 = 5, y2 = 2;
-        int x3 = 0, y3 = -1;
-        int x4 = -5, y4 = 2;
+        // Convert to screen coordinates
+        int tileScreenX = screenX + size / 2 + (int) (relativeX * zoom);
+        int tileScreenY = screenY + size / 2 + (int) (relativeZ * zoom);
+        int tileScreenSize = (int) (TileManager.TILE_SIZE * zoom);
 
-        drawTriangle(graphics, x1, y1, x2, y2, x3, y3, arrowColor);
-        drawTriangle(graphics, x1, y1, x3, y3, x4, y4, arrowColor);
-        drawArrowOutline(graphics, x1, y1, x2, y2, x3, y3, x4, y4, 0xFFFFFFFF);
-    }
+        // Clip to minimap bounds
+        if (tileScreenX + tileScreenSize < screenX || tileScreenX > screenX + size ||
+                tileScreenY + tileScreenSize < screenY || tileScreenY > screenY + size) {
+            return; // Completely outside
+        }
 
-    private static void drawTextureArrow(net.minecraft.client.gui.GuiGraphics graphics, Minecraft mc) {
-        int size = 16;
+        // Draw the tile
         graphics.blit(
-                TextureHelper.PLAYER_ARROW,
-                -size / 2, -size / 2,
-                0, 0,
-                size, size,
-                size, size
+                texture,
+                tileScreenX, tileScreenY,
+                tileScreenSize, tileScreenSize,
+                0.0F, 0.0F,
+                TileManager.TILE_SIZE, TileManager.TILE_SIZE,
+                TileManager.TILE_SIZE, TileManager.TILE_SIZE
         );
     }
 
-    private static void drawTriangle(net.minecraft.client.gui.GuiGraphics graphics,
-                                     int x1, int y1, int x2, int y2, int x3, int y3, int color) {
-        int minX = Math.min(x1, Math.min(x2, x3));
-        int maxX = Math.max(x1, Math.max(x2, x3));
-        int minY = Math.min(y1, Math.min(y2, y3));
-        int maxY = Math.max(y1, Math.max(y2, y3));
+    /**
+     * Get or load tile texture
+     */
+    private static ResourceLocation getTileTexture(int tileX, int tileZ) {
+        String key = tileX + "_" + tileZ;
 
-        for (int y = minY; y <= maxY; y++) {
-            for (int x = minX; x <= maxX; x++) {
-                if (isPointInTriangle(x, y, x1, y1, x2, y2, x3, y3)) {
-                    graphics.fill(x, y, x + 1, y + 1, color);
-                }
+        if (tileTextureCache.containsKey(key)) {
+            return tileTextureCache.get(key);
+        }
+
+        // Load tile image
+        BufferedImage tileImage = TileManager.loadTile(tileX, tileZ);
+        if (tileImage == null) {
+            return null;
+        }
+
+        // Convert to NativeImage and upload to GPU
+        NativeImage nativeImage = new NativeImage(TileManager.TILE_SIZE, TileManager.TILE_SIZE, false);
+
+        for (int x = 0; x < TileManager.TILE_SIZE; x++) {
+            for (int y = 0; y < TileManager.TILE_SIZE; y++) {
+                int rgb = tileImage.getRGB(x, y);
+                int a = (rgb >> 24) & 0xFF;
+                int r = (rgb >> 16) & 0xFF;
+                int g = (rgb >> 8) & 0xFF;
+                int b = rgb & 0xFF;
+                int abgr = (a << 24) | (b << 16) | (g << 8) | r;
+                nativeImage.setPixelRGBA(x, y, abgr);
             }
         }
+
+        DynamicTexture dynamicTexture = new DynamicTexture(nativeImage);
+
+        ResourceLocation location = ResourceLocation.fromNamespaceAndPath(
+                Cartographica.MOD_ID,
+                "minimap_tile_" + nextTextureId++
+        );
+
+        mc.getTextureManager().register(location, dynamicTexture);
+        tileTextureCache.put(key, location);
+
+        return location;
     }
 
-    private static boolean isPointInTriangle(int px, int py, int x1, int y1, int x2, int y2, int x3, int y3) {
-        float denom = ((y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3));
-        if (denom == 0) return false;
+    /**
+     * Render player marker
+     */
+    private static void renderPlayerMarker(GuiGraphics graphics, int centerX, int centerY) {
+        CartographicaConfig.PlayerMarkerType type = CartographicaConfig.PLAYER_MARKER_TYPE.get();
+        int color = CartographicaConfig.PLAYER_MARKER_COLOR.get();
+        int size = CartographicaConfig.PLAYER_MARKER_SIZE.get();
 
-        float a = ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)) / denom;
-        float b = ((y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)) / denom;
-        float c = 1 - a - b;
-
-        return a >= 0 && a <= 1 && b >= 0 && b <= 1 && c >= 0 && c <= 1;
-    }
-
-    private static void drawArrowOutline(net.minecraft.client.gui.GuiGraphics graphics,
-                                         int x1, int y1, int x2, int y2, int x3, int y3, int x4, int y4, int color) {
-        drawLine(graphics, x1, y1, x2, y2, color);
-        drawLine(graphics, x2, y2, x3, y3, color);
-        drawLine(graphics, x3, y3, x4, y4, color);
-        drawLine(graphics, x4, y4, x1, y1, color);
-    }
-
-    private static void drawLine(net.minecraft.client.gui.GuiGraphics graphics, int x1, int y1, int x2, int y2, int color) {
-        int dx = Math.abs(x2 - x1);
-        int dy = Math.abs(y2 - y1);
-        int sx = x1 < x2 ? 1 : -1;
-        int sy = y1 < y2 ? 1 : -1;
-        int err = dx - dy;
-
-        while (true) {
-            graphics.fill(x1, y1, x1 + 1, y1 + 1, color);
-            if (x1 == x2 && y1 == y2) break;
-            int e2 = 2 * err;
-            if (e2 > -dy) { err -= dy; x1 += sx; }
-            if (e2 < dx) { err += dx; y1 += sy; }
+        switch (type) {
+            case ARROW:
+                renderArrowMarker(graphics, centerX, centerY, size, color);
+                break;
+            case DOT:
+                renderDotMarker(graphics, centerX, centerY, size, color);
+                break;
+            case CROSSHAIR:
+                renderCrosshairMarker(graphics, centerX, centerY, size, color);
+                break;
+            case SURVEYOR:
+                renderSurveyorMarker(graphics, centerX, centerY, size, color);
+                break;
         }
     }
 
-    private static void drawCoordinates(net.minecraft.client.gui.GuiGraphics graphics, Minecraft mc,
-                                        int minimapX, int minimapY, int minimapSize) {
-        Vec3 pos = mc.player.position();
-        String coords = String.format("X: %d Y: %d Z: %d", (int)pos.x, (int)pos.y, (int)pos.z);
-
-        int textX = minimapX;
-        int textY = minimapY + minimapSize + 2;
-        graphics.drawString(mc.font, coords, textX, textY, 0xFFFFFFFF, true);
+    private static void renderArrowMarker(GuiGraphics graphics, int x, int y, int size, int color) {
+        // Simple triangle pointing up
+        graphics.fill(x, y - size / 2, x + 1, y + size / 2, color);
+        graphics.fill(x - size / 2, y, x + size / 2, y + 1, color);
     }
 
-    private static void drawBorder(net.minecraft.client.gui.GuiGraphics graphics, int x, int y, int size, int color) {
-        graphics.fill(x, y, x + size, y + 1, color);
-        graphics.fill(x, y + size - 1, x + size, y + size, color);
-        graphics.fill(x, y, x + 1, y + size, color);
-        graphics.fill(x + size - 1, y, x + size, y + size, color);
+    private static void renderDotMarker(GuiGraphics graphics, int x, int y, int size, int color) {
+        // Simple square dot
+        int half = size / 2;
+        graphics.fill(x - half, y - half, x + half, y + half, color);
+    }
+
+    private static void renderCrosshairMarker(GuiGraphics graphics, int x, int y, int size, int color) {
+        // Crosshair
+        graphics.fill(x - size, y, x + size, y + 1, color);
+        graphics.fill(x, y - size, x + 1, y + size, color);
+    }
+
+    private static void renderSurveyorMarker(GuiGraphics graphics, int x, int y, int size, int color) {
+        // Surveyor crosshair (like you designed before!)
+        int armLength = size;
+        int gap = size / 2;
+        int thickness = 2;
+
+        // Top
+        graphics.fill(x - thickness / 2, y - armLength, x + thickness / 2, y - gap, color);
+        // Bottom
+        graphics.fill(x - thickness / 2, y + gap, x + thickness / 2, y + armLength, color);
+        // Left
+        graphics.fill(x - armLength, y - thickness / 2, x - gap, y + thickness / 2, color);
+        // Right
+        graphics.fill(x + gap, y - thickness / 2, x + armLength, y + thickness / 2, color);
+    }
+
+    /**
+     * Render overlay information (coordinates, time, etc.)
+     */
+    private static void renderOverlays(GuiGraphics graphics, int x, int y, int size) {
+        int textY = y + size + 5;
+
+        if (CartographicaConfig.SHOW_COORDINATES.get() && mc.player != null) {
+            String coords = String.format("X: %.0f, Y: %.0f, Z: %.0f",
+                    mc.player.getX(), mc.player.getY(), mc.player.getZ());
+            graphics.drawString(mc.font, coords, x, textY, 0xFFFFFFFF, true);
+            textY += 12;
+        }
+
+        if (CartographicaConfig.SHOW_TIME.get() && mc.level != null) {
+            long time = mc.level.getDayTime() % 24000;
+            int hours = (int) ((time / 1000 + 6) % 24);
+            int minutes = (int) ((time % 1000) * 60 / 1000);
+            String timeStr = String.format("Time: %02d:%02d", hours, minutes);
+            graphics.drawString(mc.font, timeStr, x, textY, 0xFFFFFFFF, true);
+            textY += 12;
+        }
+
+        if (CartographicaConfig.SHOW_BIOME.get() && mc.player != null && mc.level != null) {
+            var biome = mc.level.getBiome(mc.player.blockPosition());
+            String biomeName = biome.unwrapKey().map(key -> key.location().getPath()).orElse("Unknown");
+            graphics.drawString(mc.font, "Biome: " + biomeName, x, textY, 0xFFFFFFFF, true);
+            textY += 12;
+        }
+
+        if (CartographicaConfig.SHOW_FPS.get()) {
+            String fps = mc.fpsString.split(" ")[0] + " FPS";
+            graphics.drawString(mc.font, fps, x, textY, 0xFFFFFFFF, true);
+        }
+    }
+
+    /**
+     * Calculate X position based on corner setting
+     */
+    private static int calculateX(CartographicaConfig.MinimapPosition position, int size, int margin) {
+        int screenWidth = mc.getWindow().getGuiScaledWidth();
+
+        return switch (position) {
+            case TOP_LEFT, BOTTOM_LEFT -> margin;
+            case TOP_RIGHT, BOTTOM_RIGHT -> screenWidth - size - margin;
+        };
+    }
+
+    /**
+     * Calculate Y position based on corner setting
+     */
+    private static int calculateY(CartographicaConfig.MinimapPosition position, int size, int margin) {
+        int screenHeight = mc.getWindow().getGuiScaledHeight();
+
+        return switch (position) {
+            case TOP_LEFT, TOP_RIGHT -> margin;
+            case BOTTOM_LEFT, BOTTOM_RIGHT -> screenHeight - size - margin;
+        };
     }
 }

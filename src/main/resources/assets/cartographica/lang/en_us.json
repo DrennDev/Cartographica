@@ -1,4 +1,7 @@
 {
   "key.categories.cartographica": "Cartographica",
-  "key.cartographica.open_map": "Open Map"
+  "key.cartographica.open_map": "Open Fullscreen Map",
+  "key.cartographica.zoom_in": "Zoom In Minimap",
+  "key.cartographica.zoom_out": "Zoom Out Minimap",
+  "key.cartographica.toggle_minimap": "Toggle Minimap"
 }
